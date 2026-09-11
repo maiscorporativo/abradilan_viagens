@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f4f8fb;
+  --foreground: #101828;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-rubik);
+  --font-mono: var(--font-jetbrains);
+}
+
+/* Paleta ABRADILAN (extraída de abradilan.com.br e do logo)
+   azul institucional #1690d0 · azul-marinho #0f2836
+   verde-limão #a0bf27 · amarelo #fec33b · grafite #101828
+
+   Os nomes das rampas (brand/sun/ember) são os mesmos do sistema de origem,
+   de propósito: só os valores mudam, então nenhum componente precisou ser
+   reescrito para trocar a identidade visual. */
+@theme {
+  /* azul ABRADILAN — cor primária */
+  --color-brand-50: #eef7fc;
+  --color-brand-100: #d7ecf8;
+  --color-brand-200: #b0d9f1;
+  --color-brand-300: #7cc0e7;
+  --color-brand-400: #3fa5dc;
+  --color-brand-500: #1690d0;
+  --color-brand-600: #1176ab;
+  --color-brand-700: #0f5e89;
+  --color-brand-800: #0f4c6e;
+  --color-brand-900: #0f3a53;
+
+  /* azul-marinho ABRADILAN — cor de apoio (cabeçalhos, dados, links) */
+  --color-sun-50: #eef3f6;
+  --color-sun-100: #d8e3ea;
+  --color-sun-300: #7c98aa;
+  --color-sun-400: #1f4760;
+  --color-sun-500: #0f2836;
+  --color-sun-600: #0a1d28;
+
+  /* verde-limão do símbolo — destaques */
+  --color-ember-50: #f5f9e6;
+  --color-ember-100: #e9f2c7;
+  --color-ember-500: #a0bf27;
+  --color-ember-600: #6f8a17;
+  --color-ember-700: #566b12;
+
+  /* grafite */
+  --color-graphite-500: #475467;
+  --color-graphite-700: #101828;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+::selection {
+  background: #b0d9f1;
+}

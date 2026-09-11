@@ -1,0 +1,762 @@
+// Plataforma White-Label de Gestão de Viagens de Incentivo
+// Banco padrão: SQLite (zero configuração). Para produção, troque o
+// datasource para PostgreSQL (ver README) — o schema é compatível.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Usuários do sistema (staff da agência / cliente)
+// Papéis: MASTER (tudo), AGENTE (opera viagens), VISUALIZADOR (somente leitura)
+// ---------------------------------------------------------------------------
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         String   @default("AGENTE") // MASTER | AGENTE | VISUALIZADOR
+  active       Boolean  @default(true)
+  // true = acessa todas as viagens (padrão, compatível com usuários antigos);
+  // false = acessa somente as viagens listadas em tripAccess
+  allTrips     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  logs       ActivityLog[]
+  tripAccess UserTripAccess[]
+}
+
+// Viagens liberadas para um usuário quando allTrips = false
+model UserTripAccess {
+  userId String
+  tripId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@id([userId, tripId])
+}
+
+// ---------------------------------------------------------------------------
+// Viagem OU evento (multi-tenant: tudo é escopado por Trip)
+//
+// No portal ABRADILAN o mesmo container atende dois formatos:
+//   kind = VIAGEM  → viagem de incentivo (fluxo original de check-in)
+//   kind = EVENTO  → evento institucional (jantar, congresso, missão)
+// O módulo de convites (empresas com cota, convite digital com QR, mapa de
+// mesas e credenciamento) é OPCIONAL e ligado por `invitesEnabled`.
+// ---------------------------------------------------------------------------
+model Trip {
+  id             String    @id @default(cuid())
+  kind           String    @default("VIAGEM") // VIAGEM | EVENTO
+  name           String // ex.: "Convenção Britânia 2026 — Mallorca"
+  clientName     String // empresa cliente (white-label)
+  slug           String    @unique
+  destination    String    @default("")
+  startDate      DateTime?
+  endDate        DateTime?
+  description    String    @default("")
+  status         String    @default("PLANEJAMENTO") // PLANEJAMENTO | INSCRICOES | EM_ANDAMENTO | CONCLUIDA | ARQUIVADA
+  logoPath       String    @default("")
+  bannerPath     String    @default("") // arte exibida na home do portal do passageiro
+  primaryColor   String    @default("#1690d0")
+  secondaryColor String    @default("#0f2836")
+  formToken      String    @unique // link público do formulário do convidado
+  formOpen       Boolean   @default(true)
+  formWelcome    String    @default("") // texto de boas-vindas do formulário
+  allowCompanion Boolean   @default(true)
+
+  // ---- Módulo de convites (só usado quando invitesEnabled = true) ----
+  invitesEnabled Boolean   @default(false)
+  eventTime      String    @default("") // "20:00"
+  venueName      String    @default("")
+  venueAddress   String    @default("")
+  dressCode      String    @default("")
+  inviteDeadline DateTime? // data-limite para as empresas usarem suas cotas
+  individualPool Int       @default(0) // convites livres (pós-expiração + extras)
+  invitesExpired Boolean   @default(false) // expiração já processada
+  hotels         String    @default("[]") // JSON [{nome, endereco, telefone, distancia}]
+  facilities     String    @default("[]") // JSON [{titulo, descricao}]
+  tablesEnabled  Boolean   @default(true) // mapa de mesas ativo neste evento
+
+  // Personalização das mensagens de convite
+  inviteBannerPath   String @default("") // arte no topo do e-mail
+  letterheadPath     String @default("") // timbrado dos relatórios impressos
+  emailTitle         String @default("")
+  emailText          String @default("")
+  emailFooter        String @default("")
+  whatsappTemplate   String @default("") // modelo com {{placeholders}}
+  cancelTemplate     String @default("")
+  showAgencyLogo     Boolean @default(true)
+  replyTo            String @default("") // respostas do e-mail caem aqui
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  eventCompanies   EventCompany[]
+  invites          Invite[]
+  eventTables      EventTable[]
+  passengers       Passenger[]
+  flights          Flight[]
+  accommodations   Accommodation[]
+  itineraryItems   ItineraryItem[]
+  checklistItems   ChecklistItem[]
+  muralPosts       MuralPost[]
+  tickets          Ticket[]
+  documents        TripDocument[]
+  voucherTemplates VoucherTemplate[]
+  groups           TripGroup[]
+  logs             ActivityLog[]
+  userAccess       UserTripAccess[]
+}
+
+// Grupos/segmentações da viagem (equivalente às "cores" do sistema antigo)
+model TripGroup {
+  id     String @id @default(cuid())
+  tripId String
+  name   String // ex.: "G1", "Azul", "Staff"
+  color  String @default("#64748b") // cor hex para identificação visual
+
+  trip       Trip        @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  passengers Passenger[]
+
+  @@unique([tripId, name])
+}
+
+// ---------------------------------------------------------------------------
+// Passageiros (titulares e acompanhantes)
+// ---------------------------------------------------------------------------
+model Passenger {
+  id             String    @id @default(cuid())
+  tripId         String
+  type           String    @default("TITULAR") // TITULAR | ACOMPANHANTE
+  titularId      String? // acompanhante aponta para o titular
+  name           String
+  email          String    @default("")
+  phone          String    @default("")
+  cpf            String    @default("")
+  birthDate      DateTime?
+  passportNumber String    @default("")
+  passportExpiry DateTime?
+  rg             String    @default("")
+  city           String    @default("")
+  uf             String    @default("")
+  category       String    @default("") // ex.: "Diretoria", "Cliente", "Staff"
+  groupId        String?
+  dietary        String    @default("") // alergias / restrições alimentares
+  medicalNotes   String    @default("")
+  emergencyName  String    @default("")
+  emergencyPhone String    @default("")
+  rsvpStatus     String    @default("PENDENTE") // PENDENTE | CONFIRMADO | RECUSADO | CANCELADO
+  pin            String    @default("") // acesso ao portal do passageiro (inicia = CPF)
+  pinCustom      Boolean   @default(false) // true quando o passageiro trocou o PIN
+  blocked        Boolean   @default(false)
+  notes          String    @default("")
+  formFilledAt   DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  trip           Trip                     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  titular        Passenger?               @relation("Companions", fields: [titularId], references: [id], onDelete: SetNull)
+  companions     Passenger[]              @relation("Companions")
+  group          TripGroup?               @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  documents      PassengerDocument[]
+  flights        FlightPassenger[]
+  accommodations AccommodationPassenger[]
+  tickets        Ticket[]
+  tripDocuments  TripDocument[]
+
+  @@index([tripId, cpf])
+  @@index([tripId, name])
+}
+
+// Documentos anexados pelo/para o passageiro (passaporte, RG, visto, seguro…)
+model PassengerDocument {
+  id          String   @id @default(cuid())
+  passengerId String
+  kind        String   @default("OUTRO") // PASSAPORTE | RG | VISTO | SEGURO | FOTO | OUTRO
+  fileName    String
+  filePath    String
+  mimeType    String   @default("application/octet-stream")
+  size        Int      @default(0)
+  uploadedBy  String   @default("") // nome de quem enviou
+  createdAt   DateTime @default(now())
+
+  passenger Passenger @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Catálogos globais de aviação (compartilhados entre viagens)
+// ---------------------------------------------------------------------------
+model Airline {
+  code     String @id // IATA 2 letras: LA, G3, AD, LH…
+  name     String
+  logoPath String @default("")
+}
+
+model Airport {
+  iata    String @id // GRU, PMI, MAD…
+  name    String
+  city    String @default("")
+  country String @default("")
+}
+
+// ---------------------------------------------------------------------------
+// Voos da viagem
+// ---------------------------------------------------------------------------
+model Flight {
+  id           String    @id @default(cuid())
+  tripId       String
+  scope        String    @default("INTERNACIONAL") // NACIONAL | INTERNACIONAL
+  airlineCode  String    @default("")
+  airlineName  String    @default("")
+  flightNumber String // ex.: "LA8065"
+  operatedBy   String    @default("") // cia operadora, quando difere da comercializadora
+  originIata   String
+  originName   String    @default("")
+  destIata     String
+  destName     String    @default("")
+  depDateTime  DateTime?
+  arrDateTime  DateTime?
+  // Localizador padrão do voo. Mantido por compatibilidade e como fallback de
+  // exibição; o cadastro atual usa a lista em FlightLocator.
+  locator      String    @default("")
+  notes        String    @default("")
+  createdAt    DateTime  @default(now())
+
+  trip       Trip              @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  passengers FlightPassenger[]
+  locators   FlightLocator[]
+
+  @@index([tripId])
+}
+
+// Um mesmo voo costuma ter vários localizadores (PNRs), um por reserva/bloco.
+// O passageiro é alocado ao voo e ao seu localizador dentro dele.
+model FlightLocator {
+  id       String @id @default(cuid())
+  flightId String
+  code     String
+  notes    String @default("") // ex.: "bloco diretoria", nome da emissora
+
+  flight     Flight            @relation(fields: [flightId], references: [id], onDelete: Cascade)
+  passengers FlightPassenger[]
+
+  @@unique([flightId, code])
+  @@index([flightId])
+}
+
+model FlightPassenger {
+  flightId     String
+  passengerId  String
+  locatorId    String? // localizador do passageiro dentro deste voo
+  seat         String @default("")
+  ticketNumber String @default("")
+  eticket      String @default("")
+
+  flight    Flight         @relation(fields: [flightId], references: [id], onDelete: Cascade)
+  passenger Passenger      @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+  locator   FlightLocator? @relation(fields: [locatorId], references: [id], onDelete: SetNull)
+
+  @@id([flightId, passengerId])
+  @@index([locatorId])
+}
+
+// ---------------------------------------------------------------------------
+// Hospedagens
+// ---------------------------------------------------------------------------
+model Accommodation {
+  id       String    @id @default(cuid())
+  tripId   String
+  name     String
+  address  String    @default("")
+  city     String    @default("")
+  country  String    @default("")
+  phone    String    @default("")
+  checkIn  DateTime?
+  checkOut DateTime?
+  notes    String    @default("")
+
+  trip       Trip                     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  passengers AccommodationPassenger[]
+
+  @@index([tripId])
+}
+
+model AccommodationPassenger {
+  accommodationId String
+  passengerId     String
+  roomNumber      String @default("")
+  roomType        String @default("")
+
+  accommodation Accommodation @relation(fields: [accommodationId], references: [id], onDelete: Cascade)
+  passenger     Passenger     @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+
+  @@id([accommodationId, passengerId])
+}
+
+// ---------------------------------------------------------------------------
+// Cronograma (day-by-day / tempos e movimentos) e Checklist operacional
+// ---------------------------------------------------------------------------
+model ItineraryItem {
+  id          String    @id @default(cuid())
+  tripId      String
+  date        DateTime?
+  startTime   String    @default("") // "09:30"
+  endTime     String    @default("")
+  timezone    String    @default("")
+  title       String
+  location    String    @default("")
+  responsible String    @default("")
+  notes       String    @default("")
+  status      String    @default("PENDENTE") // PENDENTE | EM_ANDAMENTO | CONCLUIDO | CANCELADO
+  audience    String    @default("TODOS") // TODOS | STAFF | grupo específico
+  sortOrder   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId, date])
+}
+
+model ChecklistItem {
+  id          String    @id @default(cuid())
+  tripId      String
+  subject     String
+  category    String    @default("")
+  responsible String    @default("")
+  startDate   DateTime?
+  endDate     DateTime?
+  status      String    @default("PENDENTE") // PENDENTE | EM_ANDAMENTO | CONCLUIDO | ATRASADO
+  notes       String    @default("")
+  history     String    @default("")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId])
+}
+
+// ---------------------------------------------------------------------------
+// Mural de recados (segmentável) e Suporte (tickets com conversa)
+// ---------------------------------------------------------------------------
+model MuralPost {
+  id          String   @id @default(cuid())
+  tripId      String
+  title       String
+  message     String
+  targetType  String   @default("TODOS") // TODOS | GRUPO | INDIVIDUAL
+  targetValue String   @default("") // id do grupo ou do passageiro
+  urgent      Boolean  @default(false)
+  active      Boolean  @default(true)
+  author      String   @default("")
+  createdAt   DateTime @default(now())
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId])
+}
+
+model Ticket {
+  id          String   @id @default(cuid())
+  tripId      String
+  passengerId String
+  subject     String
+  status      String   @default("NOVO") // NOVO | EM_ATENDIMENTO | RESPONDIDO | RESOLVIDO
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  trip      Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  passenger Passenger       @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+  messages  TicketMessage[]
+
+  @@index([tripId, status])
+}
+
+model TicketMessage {
+  id         String   @id @default(cuid())
+  ticketId   String
+  authorType String   @default("PASSAGEIRO") // PASSAGEIRO | STAFF
+  authorName String   @default("")
+  body       String
+  createdAt  DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Documentos da viagem (gerais ou direcionados a um passageiro)
+// ---------------------------------------------------------------------------
+model TripDocument {
+  id          String   @id @default(cuid())
+  tripId      String
+  passengerId String? // null = documento geral da viagem
+  title       String
+  category    String   @default("GERAL") // GERAL | VOUCHER | SEGURO | INGRESSO | OUTRO
+  fileName    String
+  filePath    String
+  mimeType    String   @default("application/octet-stream")
+  size        Int      @default(0)
+  visibleToPassenger Boolean @default(true)
+  createdAt   DateTime @default(now())
+
+  trip      Trip       @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  passenger Passenger? @relation(fields: [passengerId], references: [id], onDelete: Cascade)
+
+  @@index([tripId])
+}
+
+// ---------------------------------------------------------------------------
+// Templates de voucher customizáveis por viagem
+// layout: JSON com blocos exibidos (dados do passageiro, voos, hotel, texto livre…)
+// ---------------------------------------------------------------------------
+model VoucherTemplate {
+  id           String   @id @default(cuid())
+  tripId       String
+  name         String // ex.: "Voucher Internacional", "Voucher de Hospedagem"
+  kind         String   @default("PERSONALIZADO") // AEREO | HOSPEDAGEM | COMPLETO | PERSONALIZADO
+  headerText   String   @default("")
+  footerText   String   @default("")
+  accentColor  String   @default("#1690d0")
+  logoPath     String   @default("")
+  sections     String   @default("[]") // JSON: ordem e config das seções (modo automático)
+  // Modo "template PDF": um PDF enviado pelo agente serve de fundo e os
+  // campos posicionados no editor visual são impressos por cima
+  backgroundPdfPath String @default("")
+  fields            String @default("[]") // JSON: campos posicionados (PlacedField[])
+  // Exibe o voucher em "Documentos" no portal do passageiro (gera sob demanda)
+  visibleToPassenger Boolean @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  trip Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Trilha de auditoria
+// ---------------------------------------------------------------------------
+model ActivityLog {
+  id        String   @id @default(cuid())
+  tripId    String?
+  userId    String?
+  actorName String   @default("")
+  actorType String   @default("STAFF") // STAFF | PASSAGEIRO | SISTEMA
+  action    String // ex.: "passenger.create"
+  details   String   @default("")
+  createdAt DateTime @default(now())
+
+  trip Trip? @relation(fields: [tripId], references: [id], onDelete: SetNull)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tripId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// ASSOCIADO ABRADILAN
+// Conta permanente (e-mail + senha) que dá acesso à área do usuário em /app:
+// aéreo, eventos e linha direta. Distinta de User (staff) e de Passenger
+// (convidado de uma viagem/evento específico).
+// ---------------------------------------------------------------------------
+model Associate {
+  id                 String   @id @default(cuid())
+  name               String
+  email              String   @unique
+  passwordHash       String
+  companyName        String   @default("") // distribuidora / empresa associada
+  cnpj               String   @default("")
+  phone              String   @default("")
+  role               String   @default("ASSOCIADO") // ASSOCIADO | GESTOR
+  active             Boolean  @default(true)
+  mustChangePassword Boolean  @default(true)
+  lastLoginAt        DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  travelRequests TravelRequest[]
+  eventCompanies EventCompany[]
+}
+
+// Convite de primeiro acesso do associado (mesma mecânica do Trip.formToken)
+model AssociateInvite {
+  id        String    @id @default(cuid())
+  email     String
+  token     String    @unique
+  usedAt    DateTime?
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([email])
+}
+
+// ---------------------------------------------------------------------------
+// LINHA DIRETA — briefing de viagem enviado ao atendente dedicado
+// ---------------------------------------------------------------------------
+model TravelRequest {
+  id             String  @id @default(cuid())
+  associateId    String?
+  requesterName  String  @default("")
+  requesterEmail String  @default("")
+  requesterPhone String  @default("")
+  companyName    String  @default("")
+
+  // Resumo do itinerário, derivado dos segmentos na gravação. Existe para que
+  // a fila do staff e a home do associado listem a solicitação sem precisar
+  // carregar os trechos — a fonte da verdade é TravelSegment.
+  kind        String    @default("AEREO") // AEREO | HOTEL | PACOTE | EVENTO | OUTRO
+  origin      String    @default("")
+  destination String    @default("")
+  departDate  DateTime?
+  returnDate  DateTime?
+  tripType    String    @default("IDA_VOLTA") // SO_IDA | IDA_VOLTA | MULTITRECHO
+
+  flexibleDates Boolean @default(false)
+  pax           Int     @default(1) // total de passageiros (= TravelPassenger)
+  budget        String  @default("")
+  purpose       String  @default("") // motivo / briefing da viagem
+  notes         String  @default("")
+
+  // ---- Serviços solicitados (cada bloco só é preenchido quando ativado) ----
+  needsFlight Boolean @default(true)
+  cabinClass      String  @default("ECONOMICA") // ECONOMICA | PREMIUM | EXECUTIVA | PRIMEIRA
+  preferredAirline String @default("")
+  checkedBaggage  Boolean @default(true)
+  seatPreference  String  @default("") // JANELA | CORREDOR | INDIFERENTE
+  loyaltyProgram  String  @default("")
+
+  needsHotel     Boolean   @default(false)
+  hotelCity      String    @default("")
+  hotelCheckIn   DateTime?
+  hotelCheckOut  DateTime?
+  hotelCategory  String    @default("") // 3 | 4 | 5 | INDIFERENTE
+  hotelRooms     Int       @default(1)
+  hotelRoomType  String    @default("") // SINGLE | DUPLO | TWIN | SUITE
+  hotelChain     String    @default("")
+  hotelBreakfast Boolean   @default(true)
+  hotelReference String    @default("") // "perto do centro de convenções…"
+
+  needsTransfer   Boolean @default(false)
+  needsCarRental  Boolean @default(false)
+  carCategory     String  @default("")
+  carPickup       String  @default("")
+  carDropoff      String  @default("")
+  carExtraDriver  Boolean @default(false)
+  needsChauffeur  Boolean @default(false)
+  transferNotes   String  @default("")
+
+  needsInsurance   Boolean @default(false)
+  needsCurrency    Boolean @default(false)
+  currencyNotes    String  @default("")
+  needsVisa        Boolean @default(false)
+  visaNotes        String  @default("")
+  needsConnectivity Boolean @default(false)
+  needsEventTicket Boolean @default(false)
+  eventName        String  @default("")
+
+  // Cópia da solicitação para o próprio solicitante (comprovante).
+  sendCopy Boolean @default(true)
+  copyLog  String  @default("") // resultado do envio da cópia
+
+  status      String   @default("NOVO") // NOVO | EM_ATENDIMENTO | COTADO | FECHADO | CANCELADO
+  handledBy   String   @default("")
+  dispatchLog String   @default("") // resultado do disparo ao WhatsApp do atendente
+  // O associado só pode editar enquanto ninguém assumiu (status NOVO).
+  editedAt    DateTime?
+
+  // Opção de cotação escolhida pelo associado (fecha a solicitação).
+  chosenQuoteId String?
+  decidedAt     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  associate  Associate?           @relation(fields: [associateId], references: [id], onDelete: SetNull)
+  segments   TravelSegment[]
+  passengers TravelPassenger[]
+  quotes     TravelQuote[]
+  events     TravelRequestEvent[]
+
+  @@index([status, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Histórico de etapas da solicitação.
+// É a fonte da régua visual mostrada ao atendente e ao associado: cada
+// transição vira uma linha com data, autor e observação, em vez de só
+// sobrescrever o status.
+// ---------------------------------------------------------------------------
+model TravelRequestEvent {
+  id        String   @id @default(cuid())
+  requestId String
+  status    String // NOVO | EM_ATENDIMENTO | COTADO | FECHADO | CANCELADO
+  note      String   @default("")
+  actorName String   @default("")
+  actorType String   @default("STAFF") // STAFF | ASSOCIADO | SISTEMA
+  createdAt DateTime @default(now())
+
+  request TravelRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Opção de cotação devolvida pelo atendente.
+// A solicitação recebe de 1 a N opções comparáveis; o associado escolhe uma,
+// o que grava chosenQuoteId e fecha a solicitação.
+// ---------------------------------------------------------------------------
+model TravelQuote {
+  id           String    @id @default(cuid())
+  requestId    String
+  sortOrder    Int       @default(0)
+  title        String // ex.: "Latam direto", "Copa com escala em PTY"
+  description  String    @default("") // o que está incluso, escalas, hotel…
+  currency     String    @default("BRL") // BRL | USD | EUR
+  totalAmount  Float     @default(0)
+  perPaxAmount Float     @default(0)
+  validUntil   DateTime? // validade da tarifa
+  createdBy    String    @default("")
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  request TravelRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, sortOrder])
+}
+
+// Trecho do itinerário (multi-destino). A ordem é dada por sortOrder.
+model TravelSegment {
+  id             String    @id @default(cuid())
+  requestId      String
+  sortOrder      Int       @default(0)
+  origin         String    @default("")
+  destination    String    @default("")
+  date           DateTime?
+  timePreference String    @default("QUALQUER") // MANHA | TARDE | NOITE | QUALQUER
+  notes          String    @default("")
+
+  request TravelRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, sortOrder])
+}
+
+// Passageiro da solicitação, com os dados que a emissão exige.
+model TravelPassenger {
+  id         String    @id @default(cuid())
+  requestId  String
+  sortOrder  Int       @default(0)
+  name       String // nome completo, como no documento
+  type       String    @default("TITULAR") // TITULAR | ACOMPANHANTE | COLABORADOR | CONVIDADO
+  birthDate  DateTime?
+  docType    String    @default("PASSAPORTE") // PASSAPORTE | RG | CPF | OUTRO
+  docNumber  String    @default("")
+  docExpiry  DateTime?
+  nationality String   @default("")
+  email      String    @default("")
+  phone      String    @default("")
+  loyalty    String    @default("") // programa + número
+  notes      String    @default("") // restrições alimentares, mobilidade, vistos…
+
+  request TravelRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId, sortOrder])
+}
+
+// ---------------------------------------------------------------------------
+// MÓDULO DE CONVITES (portado do sistema_convite)
+// Tudo escopado por Trip (o evento). Ativo apenas com Trip.invitesEnabled.
+// ---------------------------------------------------------------------------
+
+// Empresa convidada, com cota de convites e credenciais próprias de acesso
+model EventCompany {
+  id                  String   @id @default(cuid())
+  tripId              String
+  associateId         String? // vincula à conta de associado, quando houver
+  companyName         String
+  contactName         String   @default("") // responsável
+  contactRole         String   @default("")
+  email               String   @default("")
+  phone               String   @default("")
+  login               String   @unique
+  passwordHash        String
+  provisionalPassword String   @default("") // visível ao admin até a troca
+  quota               Int      @default(4)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  trip      Trip       @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  associate Associate? @relation(fields: [associateId], references: [id], onDelete: SetNull)
+  invites   Invite[]
+
+  @@index([tripId])
+}
+
+// Mesa do evento, posicionada no mapa (x/y em px do editor)
+model EventTable {
+  id         String @id @default(cuid())
+  tripId     String
+  number     Int
+  name       String @default("")
+  capacity   Int    @default(8)
+  x          Float  @default(100)
+  y          Float  @default(100)
+  shape      String @default("REDONDA") // REDONDA | RETANGULAR
+
+  trip    Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  invites Invite[]
+
+  @@unique([tripId, number])
+  @@index([tripId])
+}
+
+// Convidado + seu convite digital (token público, QR, RSVP e credenciamento)
+model Invite {
+  id          String    @id @default(cuid())
+  tripId      String
+  companyId   String? // null = convite individual (pool da organização)
+  kind        String    @default("CONVIDADO") // RESPONSAVEL | CONVIDADO | INDIVIDUAL
+  name        String
+  role        String    @default("") // cargo
+  email       String    @default("")
+  phone       String    @default("")
+  tableId     String?
+  seat        Int?
+  token       String    @unique // /convite/<token>
+  code        String    @default("") // código curto ditado por telefone na recepção
+  status      String    @default("PENDENTE") // PENDENTE | ENVIADO | CONFIRMADO | RECUSADO | CREDENCIADO | CANCELADO
+  confirmedAt DateTime?
+  checkedInAt DateTime?
+  canceledAt  DateTime?
+  canceledBy  String    @default("")
+  notes       String    @default("")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  trip       Trip             @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  company    EventCompany?    @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  table      EventTable?      @relation(fields: [tableId], references: [id], onDelete: SetNull)
+  deliveries InviteDelivery[]
+
+  @@index([tripId, status])
+  @@index([companyId])
+}
+
+// Log de disparo do convite por canal
+model InviteDelivery {
+  id        String   @id @default(cuid())
+  inviteId  String
+  channel   String // EMAIL | WHATSAPP
+  target    String // e-mail ou telefone usado
+  status    String // ENVIADO | SIMULADO | LINK_GERADO | ERRO
+  detail    String   @default("")
+  createdAt DateTime @default(now())
+
+  invite Invite @relation(fields: [inviteId], references: [id], onDelete: Cascade)
+
+  @@index([inviteId])
+}
