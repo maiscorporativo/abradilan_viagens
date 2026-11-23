@@ -1,4 +1,4 @@
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import path from "path";
 import bcrypt from "bcryptjs";
 import { db } from "./db";
@@ -48,6 +48,27 @@ export async function bootstrapDatabase() {
       },
     });
     console.log(`[bootstrap] Usuário master criado: ${email}`);
+  }
+
+  // Redefinição pontual (uma vez só) da senha do master a partir de
+  // ADMIN_EMAIL/ADMIN_PASSWORD. Um arquivo-marcador ao lado do banco impede
+  // que rode de novo nas próximas subidas.
+  const dbFile = url.startsWith("file:") ? url.slice(5) : "";
+  const resetPassword = process.env.ADMIN_PASSWORD;
+  if (existing && resetPassword && path.isAbsolute(dbFile)) {
+    const marker = path.join(path.dirname(dbFile), ".admin-reset-2026-11");
+    if (!existsSync(marker)) {
+      await db.user.update({
+        where: { id: existing.id },
+        data: {
+          role: "MASTER",
+          active: true,
+          passwordHash: await bcrypt.hash(resetPassword, 10),
+        },
+      });
+      writeFileSync(marker, new Date().toISOString());
+      console.log(`[bootstrap] Senha do master redefinida (uma vez): ${email}`);
+    }
   }
 
   // Voos antigos guardavam um único localizador em Flight.locator. Passa esse
